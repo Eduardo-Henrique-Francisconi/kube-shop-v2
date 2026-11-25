@@ -1,0 +1,5 @@
+---
+data_disk_lun: 0
+data_disk_fstype: ext4
+mongo_data_mount: /data/mongo
+mongo_uid: 999   # usuário mongodb dentro da imagem oficial

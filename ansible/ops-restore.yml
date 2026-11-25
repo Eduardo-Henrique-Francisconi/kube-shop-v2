@@ -1,0 +1,37 @@
+---
+# Rotina DESTRUTIVA: substitui os pedidos atuais pelo conteúdo do backup.
+# -e backup_name=latest|kubeshop-<env>-<data>.archive.gz
+- name: Restaurar o MongoDB
+  hosts: db
+  become: true
+  vars:
+    backup_name: latest
+  tasks:
+    - name: Backup de segurança antes de restaurar
+      ansible.builtin.command: /usr/local/bin/kubeshop-backup
+      register: ops_pre_backup
+      changed_when: true
+      when: backup_name != 'latest'   # com 'latest' o backup novo seria o restaurado
+    - name: Backup de segurança
+      ansible.builtin.debug:
+        msg: "{{ ops_pre_backup.stdout_lines | default(['ignorado (backup_name=latest)']) | last }}"
+    - name: Restaurar
+      ansible.builtin.command: /usr/local/bin/kubeshop-restore {{ backup_name | quote }}
+      register: ops_restore
+      changed_when: true
+    - name: Resultado (conferência antes/depois)
+      ansible.builtin.debug:
+        msg: "{{ ops_restore.stdout_lines }}"
+
+- name: Conferir a aplicação após a restauração
+  hosts: app
+  become: true
+  tasks:
+    - name: Pedidos visíveis pela API
+      ansible.builtin.uri:
+        url: http://127.0.0.1/api/orders
+        return_content: true
+      register: ops_orders
+    - name: Quantidade de pedidos retornados pela API (até 100)
+      ansible.builtin.debug:
+        msg: "API retorna {{ ops_orders.json.orders | length }} pedido(s)"

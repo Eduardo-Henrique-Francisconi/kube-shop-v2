@@ -1,0 +1,61 @@
+---
+- name: Diretório de chaves do apt
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Chave GPG oficial da Docker
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Repositório oficial da Docker (formato deb822)
+  ansible.builtin.copy:
+    dest: /etc/apt/sources.list.d/docker.sources
+    mode: "0644"
+    content: |
+      Types: deb
+      URIs: https://download.docker.com/linux/ubuntu
+      Suites: {{ ansible_distribution_release }}
+      Components: stable
+      Architectures: amd64
+      Signed-By: /etc/apt/keyrings/docker.asc
+  notify: Atualizar cache do apt
+
+- name: Atualizar o cache do apt agora, se o repositório foi adicionado
+  ansible.builtin.meta: flush_handlers
+
+- name: Docker Engine, Compose e SDK Python (somente se ausentes)
+  ansible.builtin.apt:
+    name: "{{ docker_packages }}"
+    state: present
+    lock_timeout: 300
+
+- name: Rotação de logs dos contêineres
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    mode: "0644"
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "3" },
+        "live-restore": true
+      }
+  notify: Reiniciar docker
+
+- name: Serviço Docker ativo e habilitado no boot
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Usuário administrativo no grupo docker
+  ansible.builtin.user:
+    name: "{{ ansible_user }}"
+    groups: docker
+    append: true
+
+- name: Aplicar handlers pendentes antes de criar contêineres
+  ansible.builtin.meta: flush_handlers

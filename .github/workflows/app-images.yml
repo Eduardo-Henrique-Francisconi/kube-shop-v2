@@ -1,0 +1,105 @@
+name: App | Build e publicação das imagens
+
+# Representa o CI/CD da aplicação (já existente na Zibiska Korp): testa, constrói e publica
+# as imagens no GHCR. Ponto de integração com a infraestrutura: a tag publicada é o
+# parâmetro docker_tag dos pipelines de infra (deploy.yml ou ops.yml -> deploy-app).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Versão (tag) das imagens, ex. 1.0.0
+        type: string
+        required: true
+        default: "1.0.0"
+      deploy_env:
+        description: Implantar automaticamente após publicar
+        type: choice
+        options: [none, dev, homolog, prod]
+        default: none
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Definir versão
+        id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then v="${GITHUB_REF_NAME#v}"; else v="$INPUT_VERSION"; fi
+          [[ "$v" =~ ^[0-9A-Za-z._-]+$ ]] || { echo "::error::versão inválida"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kubeshop" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Testes da aplicação
+        run: |
+          npm ci
+          npm test
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build e push da API
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/backend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.v.outputs.image }}-api:${{ steps.v.outputs.version }}
+            ${{ steps.v.outputs.image }}-api:sha-${{ github.sha }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+
+      - name: Build e push do frontend
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.v.outputs.image }}-frontend:${{ steps.v.outputs.version }}
+            ${{ steps.v.outputs.image }}-frontend:sha-${{ github.sha }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,scope=frontend,mode=max
+
+      - name: Resumo
+        run: |
+          {
+            echo "## Imagens publicadas"
+            echo "- \`${{ steps.v.outputs.image }}-api:${{ steps.v.outputs.version }}\`"
+            echo "- \`${{ steps.v.outputs.image }}-frontend:${{ steps.v.outputs.version }}\`"
+            echo "Implantar: workflow **2 - Infra | Operação** → deploy-app com docker_tag=${{ steps.v.outputs.version }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.deploy_env != 'none'
+    uses: ./.github/workflows/ops.yml
+    with:
+      environment: ${{ inputs.deploy_env }}
+      routine: deploy-app
+      docker_tag: ${{ needs.build.outputs.version }}
+    secrets: inherit

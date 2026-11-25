@@ -1,0 +1,50 @@
+---
+- name: Diretório local de backups
+  ansible.builtin.file:
+    path: "{{ backup_local_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Configuração do backup (URL do container e token SAS)
+  ansible.builtin.template:
+    src: backup.env.j2
+    dest: /etc/kubeshop/backup.env
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+
+- name: Scripts de backup, restauração e listagem
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/usr/local/bin/{{ item }}"
+    owner: root
+    group: root
+    mode: "0750"
+  loop:
+    - kubeshop-backup
+    - kubeshop-restore
+    - kubeshop-backup-list
+
+- name: Serviço e timer systemd do backup automatizado
+  ansible.builtin.template:
+    src: "{{ item }}.j2"
+    dest: "/etc/systemd/system/{{ item }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - kubeshop-backup.service
+    - kubeshop-backup.timer
+  notify: Recarregar systemd
+
+- name: Aplicar daemon-reload antes de habilitar o timer
+  ansible.builtin.meta: flush_handlers
+
+- name: Timer de backup habilitado e ativo
+  ansible.builtin.systemd_service:
+    name: kubeshop-backup.timer
+    state: started
+    enabled: true

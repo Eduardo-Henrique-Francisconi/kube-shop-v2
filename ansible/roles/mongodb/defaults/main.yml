@@ -1,0 +1,6 @@
+---
+mongo_container_name: mongo
+mongo_uid: 999
+mongo_config_dir: /etc/kubeshop/mongo
+mongo_data_mount: /data/mongo
+mongo_cache_gb: "0.25"

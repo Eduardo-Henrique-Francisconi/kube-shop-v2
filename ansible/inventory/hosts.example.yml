@@ -1,0 +1,19 @@
+# Gerado automaticamente pela pipeline (scripts/infra/render-inventory.sh) a partir
+# dos outputs do Terraform. Este arquivo é apenas um exemplo; hosts.yml não é versionado.
+all:
+  vars:
+    ansible_user: azureuser
+    env_name: dev
+    app_public_ip: 20.0.0.10
+    app_private_ip: 10.20.1.10
+    db_private_ip: 10.20.2.10
+    backup_container_url: https://stkubeshopxxxxx.blob.core.windows.net/backups-dev
+  children:
+    app:
+      hosts:
+        app1:
+          ansible_host: kubeshop-app   # alias do ~/.ssh/config (IP público)
+    db:
+      hosts:
+        db1:
+          ansible_host: kubeshop-db    # alias do ~/.ssh/config (IP privado via ProxyJump)

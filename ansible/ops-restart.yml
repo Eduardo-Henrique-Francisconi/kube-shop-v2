@@ -1,0 +1,43 @@
+---
+# Rotina: reinício controlado. -e service=api|frontend|mongo|all
+# Ordem segura: banco primeiro, depois API e frontend.
+- name: Reiniciar o banco
+  hosts: db
+  become: true
+  vars:
+    service: all
+  tasks:
+    - name: Reiniciar o contêiner mongo
+      community.docker.docker_container:
+        name: mongo
+        state: started
+        restart: true
+      when: service in ['all', 'mongo']
+    - name: Aguardar o MongoDB healthy
+      community.docker.docker_container_info:
+        name: mongo
+      register: ops_mongo
+      until: ops_mongo.container.State.Health.Status | default('') == 'healthy'
+      retries: 30
+      delay: 5
+
+- name: Reiniciar a aplicação
+  hosts: app
+  become: true
+  vars:
+    service: all
+  tasks:
+    - name: Reiniciar contêineres da aplicação
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: started
+        restart: true
+      loop: [api, frontend]
+      when: service in ['all', item]
+    - name: Aguardar a loja responder
+      ansible.builtin.uri:
+        url: http://127.0.0.1/api/health/ready
+      register: ops_ready
+      until: ops_ready.status == 200
+      retries: 20
+      delay: 5

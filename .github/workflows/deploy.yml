@@ -1,0 +1,271 @@
+name: 1 - Infra | Provisionar e configurar
+
+# Pipeline principal (PM04): Terraform (init -> validate -> plan -> apply) e, em seguida,
+# Ansible (SO, pacotes, Docker, MongoDB, backup, aplicação) com os mesmos parâmetros.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Ambiente de destino
+        type: choice
+        options: [dev, homolog, prod]
+        default: dev
+      action:
+        description: "plan = só mostra as mudanças | apply = aplica Terraform + Ansible"
+        type: choice
+        options: [plan, apply]
+        default: apply
+      instance_name:
+        description: Prefixo das VMs (alterar RECRIA as VMs)
+        type: string
+        default: vm-kubeshop
+      instance_type:
+        description: Tamanho da VM da aplicação
+        type: choice
+        options: [Standard_B1ms, Standard_B2s, Standard_B2ms]
+        default: Standard_B1ms
+      db_instance_type:
+        description: Tamanho da VM do MongoDB
+        type: choice
+        options: [Standard_B1ms, Standard_B2s, Standard_B2ms]
+        default: Standard_B2s
+      db_data_disk_gb:
+        description: Disco de dados do MongoDB em GiB (só aumenta)
+        type: string
+        default: "16"
+      docker_image:
+        description: "Prefixo das imagens (vazio = ghcr.io/<dono-do-repo>/kubeshop)"
+        type: string
+        default: ""
+      docker_tag:
+        description: Versão das imagens da aplicação (tag)
+        type: string
+        default: "1.0.0"
+      mongo_tag:
+        description: Versão da imagem do MongoDB
+        type: string
+        default: "8.0.17"
+      update_os:
+        description: Aplicar atualizações do sistema operacional
+        type: boolean
+        default: false
+      extra_packages:
+        description: Pacotes adicionais (separados por vírgula)
+        type: string
+        default: "git, unzip"
+      allow_replace:
+        description: Permitir plano que DESTRUA/RECRIE VMs ou o disco do banco
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  SHARED_RG: rg-kubeshop-shared
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_backup_storage_account: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+  TF_VAR_location: ${{ vars.AZURE_LOCATION || 'eastus2' }}
+  TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
+  TF_VAR_admin_cidrs: ${{ vars.ADMIN_CIDRS || '[]' }}
+  TF_VAR_enable_nat_gateway: ${{ vars.ENABLE_NAT_GATEWAY || 'false' }}
+  TF_VAR_environment: ${{ inputs.environment }}
+  TF_VAR_instance_name: ${{ inputs.instance_name }}
+  TF_VAR_instance_type: ${{ inputs.instance_type }}
+  TF_VAR_db_instance_type: ${{ inputs.db_instance_type }}
+  TF_VAR_db_data_disk_gb: ${{ inputs.db_data_disk_gb }}
+  ANSIBLE_FORCE_COLOR: "1"
+
+jobs:
+  validate:
+    name: Validar código (Terraform + Ansible)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: terraform fmt -check
+        run: terraform -chdir=terraform fmt -check -recursive -diff
+
+      - name: terraform validate
+        run: |
+          terraform -chdir=terraform init -backend=false -input=false -no-color
+          terraform -chdir=terraform validate -no-color
+
+      - name: Instalar Ansible
+        run: |
+          pipx install --force --include-deps "ansible-core>=2.17" >/dev/null
+          pipx install --force ansible-lint >/dev/null
+          ansible-galaxy collection install -r ansible/requirements.yml >/dev/null
+
+      - name: ansible-playbook --syntax-check
+        working-directory: ansible
+        run: |
+          cp inventory/hosts.example.yml inventory/hosts.yml
+          for p in playbook.yml ops-*.yml; do ansible-playbook --syntax-check "$p"; done
+
+      - name: ansible-lint
+        run: ansible-lint ansible/
+
+  deploy:
+    name: Terraform + Ansible (${{ inputs.environment }} / ${{ inputs.action }})
+    needs: validate
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}   # Secrets do banco por ambiente + aprovação em prod
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parâmetros da execução
+        env:
+          INPUTS_JSON: ${{ toJSON(inputs) }}
+        run: |
+          {
+            echo "## Execução #${GITHUB_RUN_NUMBER} - ${TF_VAR_environment}"
+            echo "| Parâmetro | Valor |"; echo "|---|---|"
+            jq -r 'to_entries[] | "| \(.key) | \(.value) |"' <<<"$INPUTS_JSON"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Conferir configuração obrigatória
+        run: |
+          missing=0
+          for v in ARM_CLIENT_ID ARM_CLIENT_SECRET ARM_TENANT_ID ARM_SUBSCRIPTION_ID TF_VAR_backup_storage_account TF_VAR_ssh_public_key; do
+            [ -n "${!v}" ] || { echo "::error::Configuração ausente: $v"; missing=1; }
+          done
+          exit $missing
+
+      - name: Terraform init
+        uses: ./.github/actions/tf-init
+        with:
+          environment: ${{ inputs.environment }}
+
+      - name: terraform validate
+        working-directory: terraform
+        run: terraform validate -no-color
+
+      - name: terraform plan
+        id: plan
+        working-directory: terraform
+        run: |
+          set +e
+          terraform plan -no-color -detailed-exitcode -out=tfplan | tee plan.txt
+          ec=${PIPESTATUS[0]}
+          set -e
+          [ "$ec" -eq 1 ] && { echo "::error::terraform plan falhou"; exit 1; }
+          echo "changes=$([ "$ec" -eq 2 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          summary="$(grep -E '^(Plan:|No changes\.)' plan.txt || echo 'Sem resumo')"
+          echo "### Terraform plan" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$summary\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Proteção contra destruição/recriação
+        if: steps.plan.outputs.changes == 'true'
+        working-directory: terraform
+        env:
+          ALLOW_REPLACE: ${{ inputs.allow_replace }}
+        run: |
+          terraform show -json tfplan > plan.json
+          destroy="$(jq -r '.resource_changes[] | select(.change.actions | index("delete")) | .address' plan.json)"
+          if [ -n "$destroy" ]; then
+            echo "Recursos que serão destruídos ou recriados:"; echo "$destroy"
+            { echo "### Recursos destruídos/recriados"; echo '```'; echo "$destroy"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            if [ "$ALLOW_REPLACE" != "true" ] && grep -qE 'azurerm_(linux_virtual_machine|managed_disk|virtual_machine_data_disk_attachment)\.' <<<"$destroy"; then
+              echo "::error::O plano destrói/recria VM ou disco do banco. Revise ou execute com allow_replace=true (faça backup antes)."
+              exit 1
+            fi
+          else
+            echo "Nenhum recurso será destruído: apenas criações e alterações in-place."
+          fi
+
+      - name: Publicar plano
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}-${{ github.run_number }}
+          path: terraform/plan.txt
+          retention-days: 30
+
+      - name: terraform apply
+        if: inputs.action == 'apply' && steps.plan.outputs.changes == 'true'
+        working-directory: terraform
+        run: terraform apply -no-color -input=false tfplan
+
+      - name: Terraform sem alterações
+        if: inputs.action == 'apply' && steps.plan.outputs.changes == 'false'
+        run: echo "Infraestrutura já está no estado desejado (No changes). Seguindo para o Ansible."
+
+      - name: Acesso SSH e inventário
+        id: access
+        if: inputs.action == 'apply'
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: ${{ inputs.environment }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Ansible - configurar e manter o ambiente
+        if: inputs.action == 'apply'
+        working-directory: ansible
+        env:
+          MONGO_ROOT_PASSWORD: ${{ secrets.MONGO_ROOT_PASSWORD }}
+          MONGO_APP_PASSWORD: ${{ secrets.MONGO_APP_PASSWORD }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          DOCKER_IMAGE: ${{ inputs.docker_image }}
+          DOCKER_TAG: ${{ inputs.docker_tag }}
+          MONGO_TAG: ${{ inputs.mongo_tag }}
+          UPDATE_OS: ${{ inputs.update_os }}
+          EXTRA_PACKAGES: ${{ inputs.extra_packages }}
+        run: |
+          # Parâmetros da pipeline -> extra vars do Ansible (JSON montado com jq: sem injeção de shell)
+          jq -n \
+            --arg env_name "$TF_VAR_environment" \
+            --arg docker_image "${DOCKER_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kubeshop}" \
+            --arg docker_tag "$DOCKER_TAG" \
+            --arg mongo_tag "$MONGO_TAG" \
+            --argjson update_os "$UPDATE_OS" \
+            --arg extra_packages "$EXTRA_PACKAGES" \
+            '$ARGS.named' > /tmp/extra-vars.json
+          cat /tmp/extra-vars.json
+          ansible-playbook playbook.yml -e @/tmp/extra-vars.json 2>&1 | tee /tmp/ansible.log
+          {
+            echo "### Ansible - PLAY RECAP"
+            echo '```'
+            sed -n '/PLAY RECAP/,/^$/p' /tmp/ansible.log | sed 's/\x1b\[[0-9;]*m//g'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Smoke test externo e isolamento do banco
+        if: inputs.action == 'apply'
+        working-directory: terraform
+        run: |
+          url="$(terraform output -raw app_url)"
+          ip="$(terraform output -raw app_public_ip)"
+          curl -fsS --retry 10 --retry-delay 6 --retry-all-errors "$url/api/health/ready" | tee /tmp/ready.json; echo
+          n="$(curl -fsS "$url/api/products" | jq '.products | length')"
+          v="$(curl -fsS "$url/api/info" | jq -r .version)"
+          [ "$n" -eq 6 ] || { echo "::error::catálogo com $n produtos"; exit 1; }
+          if timeout 6 bash -c "</dev/tcp/$ip/27017" 2>/dev/null; then
+            echo "::error::porta 27017 acessível publicamente!"; exit 1
+          fi
+          {
+            echo "### Validação"
+            echo "- Loja: $url (catálogo: $n produtos, versão $v)"
+            echo "- Porta 27017 no IP público ($ip): **bloqueada**"
+            echo "- VM do banco: sem IP público (ver inventário)"
+            echo "### Inventário"; echo '```json'; terraform output -json vm_inventory | jq .; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fechar SSH temporário
+        if: always() && steps.access.outputs.resource_group != ''
+        run: scripts/infra/jit-ssh.sh close "${{ steps.access.outputs.resource_group }}" "${{ steps.access.outputs.app_nsg }}"

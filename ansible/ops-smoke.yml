@@ -1,0 +1,16 @@
+---
+# Teste funcional do repositório (scripts/smoke.mjs): cria e consulta um pedido FICTÍCIO.
+- name: Smoke test da loja
+  hosts: app
+  become: true
+  tasks:
+    - name: Executar smoke.mjs dentro da API, passando pelo Nginx
+      ansible.builtin.command: docker exec api node /app/scripts/smoke.mjs http://frontend:8080
+      register: ops_smoke
+      changed_when: true
+    - name: Resultado
+      ansible.builtin.debug:
+        msg: "{{ ops_smoke.stdout }}"
+    - name: Exigir PASS
+      ansible.builtin.assert:
+        that: ops_smoke.stdout is search('"result":"PASS"')

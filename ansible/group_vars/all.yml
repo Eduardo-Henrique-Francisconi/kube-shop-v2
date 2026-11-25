@@ -1,0 +1,23 @@
+---
+# Valores padrão. A pipeline sobrescreve com -e (extra vars sempre vencem).
+env_name: dev
+
+# Parâmetros de manutenção
+update_os: false
+extra_packages: ""
+
+# Imagens da aplicação publicadas pelo CI/CD da aplicação (GHCR)
+# Resultado: <docker_image>-api:<docker_tag> e <docker_image>-frontend:<docker_tag>
+docker_image: ghcr.io/laerciomlb/kubeshop
+docker_tag: "1.0.0"
+mongo_tag: "8.0.17"
+
+# Segredos: lidos do ambiente da pipeline (GitHub Secrets), nunca do repositório.
+mongo_root_password: "{{ lookup('ansible.builtin.env', 'MONGO_ROOT_PASSWORD') }}"
+mongo_app_password: "{{ lookup('ansible.builtin.env', 'MONGO_APP_PASSWORD') }}"
+backup_sas: "{{ lookup('ansible.builtin.env', 'BACKUP_SAS') }}"
+registry_username: "{{ lookup('ansible.builtin.env', 'REGISTRY_USERNAME') }}"
+registry_password: "{{ lookup('ansible.builtin.env', 'REGISTRY_PASSWORD') }}"
+
+mongo_database: kubeshop
+mongo_app_username: kubeshop

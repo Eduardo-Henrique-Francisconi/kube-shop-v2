@@ -1,0 +1,9 @@
+---
+app_config_dir: /etc/kubeshop/app
+app_network: kubeshop_web
+app_http_port: 80
+app_node_uid: 1000   # usuário "node" da imagem da API
+api_image: "{{ docker_image }}-api:{{ docker_tag }}"
+frontend_image: "{{ docker_image }}-frontend:{{ docker_tag }}"
+# latest muda sem aviso: força o pull. Tag fixa: só baixa se a imagem não existir.
+app_force_pull: "{{ docker_tag == 'latest' }}"

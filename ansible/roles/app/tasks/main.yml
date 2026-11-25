@@ -1,0 +1,145 @@
+---
+- name: Garantir que a senha da aplicação foi informada
+  ansible.builtin.assert:
+    that: mongo_app_password | length >= 16
+    fail_msg: "MONGO_APP_PASSWORD deve estar nos Secrets do ambiente."
+    quiet: true
+  no_log: true
+
+- name: Diretório de configuração da aplicação
+  ansible.builtin.file:
+    path: "{{ app_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Senha do usuário da aplicação no MongoDB (lida pela API como arquivo)
+  ansible.builtin.copy:
+    dest: "{{ app_config_dir }}/mongo_app_password"
+    content: "{{ mongo_app_password }}"
+    owner: "{{ app_node_uid }}"
+    group: "{{ app_node_uid }}"
+    mode: "0400"
+  no_log: true
+
+- name: Login no registry (somente se as imagens forem privadas)
+  community.docker.docker_login:
+    registry_url: "{{ docker_image.split('/')[0] }}"
+    username: "{{ registry_username }}"
+    password: "{{ registry_password }}"
+  when: registry_password | length > 0
+  no_log: true
+
+- name: Testar a conexão privada com o MongoDB antes de subir a API
+  ansible.builtin.wait_for:
+    host: "{{ db_private_ip }}"
+    port: 27017
+    timeout: 60
+
+- name: Rede Docker da aplicação
+  community.docker.docker_network:
+    name: "{{ app_network }}"
+
+- name: Contêiner da API (Node.js/Express)
+  community.docker.docker_container:
+    name: api   # o Nginx do frontend encaminha /api para o host "api"
+    image: "{{ api_image }}"
+    pull: "{{ 'always' if app_force_pull | bool else 'missing' }}"
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ app_network }}"
+    env:
+      NODE_ENV: production
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      APP_VERSION: "{{ docker_tag }}"
+      MONGO_HOST: "{{ db_private_ip }}"     # banco na outra VM, pela rede privada
+      MONGO_PORT: "27017"
+      MONGO_DATABASE: "{{ mongo_database }}"
+      MONGO_AUTH_SOURCE: "{{ mongo_database }}"
+      MONGO_USERNAME: "{{ mongo_app_username }}"
+      MONGO_PASSWORD_FILE: /run/secrets/mongo_app_password
+    volumes:
+      - "{{ app_config_dir }}/mongo_app_password:/run/secrets/mongo_app_password:ro"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opts:
+      - no-new-privileges:true
+    stop_timeout: 20
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/api/health/ready',{signal:AbortSignal.timeout(2500)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 4s
+      retries: 3
+      start_period: 30s
+    labels:
+      app: kubeshop
+      component: api
+      environment: "{{ env_name }}"
+  register: app_api
+
+- name: Aguardar a API ficar healthy
+  community.docker.docker_container_info:
+    name: api
+  register: app_api_info
+  until: app_api_info.container.State.Health.Status | default('') == 'healthy'
+  retries: 24
+  delay: 5
+
+- name: Contêiner do frontend (React servido pelo Nginx)
+  community.docker.docker_container:
+    name: frontend
+    image: "{{ frontend_image }}"
+    pull: "{{ 'always' if app_force_pull | bool else 'missing' }}"
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: "{{ app_network }}"
+    published_ports:
+      - "{{ app_http_port }}:8080"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opts:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    labels:
+      app: kubeshop
+      component: frontend
+      environment: "{{ env_name }}"
+  register: app_frontend
+
+- name: Aguardar o frontend ficar healthy
+  community.docker.docker_container_info:
+    name: frontend
+  register: app_frontend_info
+  until: app_frontend_info.container.State.Health.Status | default('') == 'healthy'
+  retries: 24
+  delay: 5
+
+- name: Remover imagens antigas sem uso (após troca de versão)
+  community.docker.docker_prune:
+    images: true
+    images_filters:
+      dangling: false
+  when: app_api is changed or app_frontend is changed
+
+- name: Versão em execução
+  ansible.builtin.debug:
+    msg: "api={{ api_image }} frontend={{ frontend_image }}"

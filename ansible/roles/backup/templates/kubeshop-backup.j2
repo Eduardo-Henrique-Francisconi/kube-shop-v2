@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Backup do banco kubeshop: mongodump compactado -> disco local -> Azure Blob Storage.
+# Gerenciado pelo Ansible. Não use "set -x": a URL contém o token SAS.
+set -euo pipefail
+source /etc/kubeshop/backup.env
+
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+name="kubeshop-${ENV_NAME}-${ts}.archive.gz"
+file="${BACKUP_LOCAL_DIR}/${name}"
+
+echo "[backup] iniciando dump do banco kubeshop -> ${name}"
+docker exec "${MONGO_CONTAINER}" mongodump --quiet \
+  --config /run/secrets/mongotools.yml --username admin --authenticationDatabase admin \
+  --db kubeshop --archive --gzip > "${file}.tmp"
+mv "${file}.tmp" "${file}"
+
+size="$(stat -c %s "${file}")"
+sha="$(sha256sum "${file}" | cut -d' ' -f1)"
+counts="$(docker exec "${MONGO_CONTAINER}" mongosh --quiet --file /opt/count-orders.js)"
+echo "[backup] arquivo local: ${size} bytes sha256=${sha} estado=${counts}"
+
+if [ -n "${BACKUP_SAS:-}" ]; then
+  curl -fsS --retry 3 --retry-delay 5 -X PUT \
+    -H "x-ms-blob-type: BlockBlob" \
+    -H "x-ms-meta-sha256: ${sha}" \
+    -H "Content-Type: application/gzip" \
+    --data-binary @"${file}" \
+    "${BACKUP_URL}/${name}${BACKUP_SAS}" > /dev/null
+  echo "[backup] enviado para ${BACKUP_URL}/${name}"
+else
+  echo "[backup] AVISO: BACKUP_SAS vazio; backup mantido apenas localmente" >&2
+fi
+
+# Retenção local: mantém os N mais recentes (a retenção remota é a lifecycle policy do Azure)
+ls -1t "${BACKUP_LOCAL_DIR}"/kubeshop-*.archive.gz 2>/dev/null \
+  | tail -n +"$((BACKUP_KEEP_LOCAL + 1))" | xargs -r rm -f --
+
+date -u +%FT%TZ > "${BACKUP_LOCAL_DIR}/.last-success"
+echo "BACKUP_OK name=${name} bytes=${size} sha256=${sha}"

@@ -1,0 +1,43 @@
+---
+# Configuração completa do ambiente KubeShop, executada pela pipeline após o Terraform.
+# Ordem: base de todas as VMs -> banco -> aplicação -> verificação.
+
+- name: Base de todas as VMs (SO, pacotes e Docker)
+  hosts: all
+  become: true
+  gather_facts: false
+  pre_tasks:
+    - name: Aguardar o SSH e o cloud-init (VM recém-criada)
+      ansible.builtin.wait_for_connection:
+        timeout: 300
+    - name: Aguardar o fim do cloud-init
+      ansible.builtin.command: cloud-init status --wait
+      register: cloud_init
+      changed_when: false
+      failed_when: cloud_init.rc not in [0, 2]   # 2 = concluído com avisos recuperáveis
+    - name: Coletar facts
+      ansible.builtin.setup:
+  roles:
+    - os_updates
+    - packages
+    - docker
+
+- name: Banco de dados isolado (VM exclusiva do MongoDB)
+  hosts: db
+  become: true
+  roles:
+    - data_disk
+    - mongodb
+    - backup
+
+- name: Aplicação (frontend Nginx + API Node.js)
+  hosts: app
+  become: true
+  roles:
+    - app
+
+- name: Verificação final dos serviços
+  hosts: all
+  become: true
+  roles:
+    - verify

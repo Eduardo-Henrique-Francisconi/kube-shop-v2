@@ -1,0 +1,9 @@
+---
+# Integração com o CI/CD da aplicação: troca apenas a versão das imagens (-e docker_tag=...),
+# sem executar Terraform nem mexer no banco.
+- name: Atualizar a versão da aplicação
+  hosts: app
+  become: true
+  roles:
+    - app
+    - verify

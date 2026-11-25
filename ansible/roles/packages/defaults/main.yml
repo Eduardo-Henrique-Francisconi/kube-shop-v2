@@ -1,0 +1,9 @@
+---
+pacotes_base:
+  - ca-certificates
+  - curl
+  - gnupg
+  - net-tools
+  - jq
+  - unattended-upgrades
+extra_packages: []

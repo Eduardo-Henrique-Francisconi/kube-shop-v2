@@ -1,0 +1,5 @@
+---
+mongo_data_mount: /data/mongo
+mongo_cache_gb: "0.25"
+backup_schedule: "*-*-* 03:00:00"   # diário, 03:00 UTC (00:00 em Brasília)
+backup_keep_local: 7

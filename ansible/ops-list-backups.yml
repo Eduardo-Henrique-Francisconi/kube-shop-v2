@@ -1,0 +1,12 @@
+---
+- name: Listar backups
+  hosts: db
+  become: true
+  tasks:
+    - name: Backups remotos e locais
+      ansible.builtin.command: /usr/local/bin/kubeshop-backup-list
+      register: ops_list
+      changed_when: false
+    - name: Resultado
+      ansible.builtin.debug:
+        msg: "{{ ops_list.stdout_lines }}"

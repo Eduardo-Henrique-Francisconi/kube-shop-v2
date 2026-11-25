@@ -1,0 +1,87 @@
+---
+# Verificações não alteram nada: aparecem como "ok" e falham a pipeline se algo estiver errado.
+- name: Coletar o estado dos serviços
+  ansible.builtin.service_facts:
+
+- name: Conferir o serviço docker
+  ansible.builtin.assert:
+    that: ansible_facts.services['docker.service'].state == 'running'
+    quiet: true
+
+- name: Verificações do banco
+  when: inventory_hostname in groups['db']
+  block:
+    - name: Estado do contêiner MongoDB
+      community.docker.docker_container_info:
+        name: mongo
+      register: verify_mongo
+
+    - name: MongoDB em execução e healthy
+      ansible.builtin.assert:
+        that:
+          - verify_mongo.exists
+          - verify_mongo.container.State.Health.Status == 'healthy'
+        quiet: true
+
+    - name: Portas em escuta no servidor do banco
+      ansible.builtin.command: ss -Hltn sport = :27017
+      register: verify_ports
+      changed_when: false
+
+    - name: Porta 27017 publicada apenas no IP privado (REQ-02)
+      ansible.builtin.assert:
+        that:
+          - verify_ports.stdout is search(db_private_ip ~ ':27017')
+          - verify_ports.stdout is not search('0\.0\.0\.0:27017')
+          - verify_ports.stdout is not search('\[::\]:27017')
+        success_msg: "27017 escutando somente em {{ db_private_ip }}"
+
+    - name: Timer de backup ativo
+      ansible.builtin.assert:
+        that: ansible_facts.services['kubeshop-backup.service'] is defined
+        quiet: true
+
+    - name: Pedidos persistidos no banco
+      ansible.builtin.command: docker exec mongo mongosh --quiet --file /opt/count-orders.js
+      register: verify_count
+      changed_when: false
+
+    - name: Estado dos dados
+      ansible.builtin.debug:
+        msg: "{{ verify_count.stdout }}"
+
+- name: Verificações da aplicação
+  when: inventory_hostname in groups['app']
+  block:
+    - name: Aguardar a porta HTTP
+      ansible.builtin.wait_for:
+        port: "{{ app_http_port | default(80) }}"
+        timeout: 60
+
+    - name: Health check da API pelo Nginx (inclui conexão com o banco)
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_http_port | default(80) }}/api/health/ready"
+        status_code: 200
+      register: verify_health
+      retries: 10
+      delay: 6
+      until: verify_health.status == 200
+
+    - name: Catálogo carregado
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_http_port | default(80) }}/api/products"
+        return_content: true
+      register: verify_products
+
+    - name: Versão publicada
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ app_http_port | default(80) }}/api/info"
+        return_content: true
+      register: verify_info
+
+    - name: Catálogo com 6 produtos e versão esperada
+      ansible.builtin.assert:
+        that:
+          - verify_products.json.products | length == 6
+          - verify_info.json.version | string == docker_tag | string
+        success_msg: "Catálogo OK; versão {{ verify_info.json.version }}"

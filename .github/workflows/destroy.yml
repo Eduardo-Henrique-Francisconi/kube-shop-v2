@@ -1,0 +1,94 @@
+name: 9 - Infra | Desativar ambiente (DESTRUTIVO)
+
+# Remove TODOS os recursos do ambiente (VMs, discos, rede, IP).
+# NÃO remove: rg-kubeshop-shared (Terraform State + backups), que continua gerando custo
+# (centavos/mês) até ser apagado manualmente. Os pedidos ficam só nos backups.
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Ambiente a desativar
+        type: choice
+        options: [dev, homolog, prod]
+        default: dev
+      final_backup:
+        description: Fazer backup final do MongoDB antes de destruir
+        type: boolean
+        default: true
+      confirm:
+        description: "Digite DESTRUIR-<ambiente> (ex.: DESTRUIR-dev)"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  SHARED_RG: rg-kubeshop-shared
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VAR_backup_storage_account: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+  TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
+  TF_VAR_environment: ${{ inputs.environment }}
+  TF_VAR_enable_nat_gateway: ${{ vars.ENABLE_NAT_GATEWAY || 'false' }}
+
+jobs:
+  destroy:
+    name: Destruir ${{ inputs.environment }}
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 45
+    steps:
+      - name: Confirmação
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          [ "$CONFIRM" = "DESTRUIR-${TF_VAR_environment}" ] || { echo "::error::Confirmação incorreta"; exit 1; }
+
+      - uses: actions/checkout@v4
+
+      - name: Terraform init
+        uses: ./.github/actions/tf-init
+        with:
+          environment: ${{ inputs.environment }}
+
+      - name: Acesso SSH e inventário (backup final)
+        id: access
+        if: inputs.final_backup
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: ${{ inputs.environment }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Backup final do MongoDB
+        if: inputs.final_backup
+        working-directory: ansible
+        run: ansible-playbook ops-backup.yml
+
+      - name: Fechar SSH temporário (antes do destroy)
+        if: always() && steps.access.outputs.resource_group != ''
+        run: scripts/infra/jit-ssh.sh close "${{ steps.access.outputs.resource_group }}" "${{ steps.access.outputs.app_nsg }}"
+
+      - name: terraform plan -destroy
+        working-directory: terraform
+        run: terraform plan -destroy -no-color -out=destroy.tfplan | tee destroy.txt
+
+      - name: terraform apply (destroy)
+        working-directory: terraform
+        run: |
+          terraform apply -no-color destroy.tfplan
+          {
+            echo "## Ambiente ${TF_VAR_environment} desativado"
+            echo "- Recursos removidos: $(grep -E '^Plan:' destroy.txt)"
+            echo "- Mantidos (geram custo até remoção manual): storage ${TF_VAR_backup_storage_account} em ${SHARED_RG}"
+            echo "  - container tfstate (state vazio do ambiente)"
+            echo "  - container backups-${TF_VAR_environment} (expira pela lifecycle policy)"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,59 @@
+---
+# Disco gerenciado do Azure anexado no LUN 0 (Terraform). Os caminhos estáveis
+# variam conforme a versão dos utilitários Azure da imagem: testamos os dois.
+- name: Localizar o disco de dados pelo LUN
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "/dev/disk/azure/data/by-lun/{{ data_disk_lun }}"
+    - "/dev/disk/azure/scsi1/lun{{ data_disk_lun }}"
+  register: data_disk_candidates
+
+- name: Definir o dispositivo do disco de dados
+  ansible.builtin.set_fact:
+    data_disk_device: >-
+      {{ (data_disk_candidates.results | selectattr('stat.exists') | map(attribute='stat.lnk_source')
+          | select | first) | default('') }}
+
+- name: Garantir que o disco foi encontrado
+  ansible.builtin.assert:
+    that: data_disk_device | length > 0
+    fail_msg: "Disco de dados no LUN {{ data_disk_lun }} não encontrado. Confira o attachment no Terraform."
+    quiet: true
+
+- name: Criar filesystem (somente se o disco estiver vazio) e expandir se o disco cresceu
+  community.general.filesystem:
+    dev: "{{ data_disk_device }}"
+    fstype: "{{ data_disk_fstype }}"
+    resizefs: true
+
+- name: Ler o UUID do filesystem
+  ansible.builtin.command: blkid -s UUID -o value {{ data_disk_device }}
+  register: data_disk_uuid
+  changed_when: false
+
+- name: Montar o disco de dados de forma persistente (fstab) em {{ mongo_data_mount }}
+  ansible.posix.mount:
+    path: "{{ mongo_data_mount }}"
+    src: "UUID={{ data_disk_uuid.stdout }}"
+    fstype: "{{ data_disk_fstype }}"
+    opts: defaults,nofail,noatime
+    state: mounted
+
+- name: Diretórios de dados do MongoDB
+  ansible.builtin.file:
+    path: "{{ mongo_data_mount }}/{{ item }}"
+    state: directory
+    owner: "{{ mongo_uid }}"
+    group: "{{ mongo_uid }}"
+    mode: "0750"
+  loop: [db, configdb]
+
+- name: Uso do disco de dados
+  ansible.builtin.command: df -h {{ mongo_data_mount }}
+  register: data_disk_df
+  changed_when: false
+
+- name: Mostrar uso do disco
+  ansible.builtin.debug:
+    msg: "{{ data_disk_df.stdout_lines }}"

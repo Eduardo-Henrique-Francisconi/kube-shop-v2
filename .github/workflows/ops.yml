@@ -1,0 +1,129 @@
+name: 2 - Infra | Operação e manutenção
+
+# Rotinas do dia a dia, sem Terraform apply: saúde, logs, reinício, backup,
+# restauração, smoke test e atualização da versão da aplicação (integração com o CI/CD da app).
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Ambiente
+        type: choice
+        options: [dev, homolog, prod]
+        default: dev
+      routine:
+        description: Rotina
+        type: choice
+        options: [health, logs, restart, backup, list-backups, restore, smoke, deploy-app]
+        default: health
+      service:
+        description: "logs/restart: all, api, frontend, mongo, backup"
+        type: choice
+        options: [all, api, frontend, mongo, backup]
+        default: all
+      backup_name:
+        description: "restore: 'latest' ou nome do arquivo (veja list-backups)"
+        type: string
+        default: latest
+      docker_tag:
+        description: "deploy-app: versão das imagens"
+        type: string
+        default: ""
+      docker_image:
+        description: "deploy-app: prefixo das imagens (vazio = ghcr.io/<dono>/kubeshop)"
+        type: string
+        default: ""
+      confirm:
+        description: "restore: digite RESTAURAR para confirmar"
+        type: string
+        default: ""
+  workflow_call:
+    inputs:
+      environment: { type: string, required: true }
+      routine: { type: string, required: true }
+      service: { type: string, default: all }
+      backup_name: { type: string, default: latest }
+      docker_tag: { type: string, default: "" }
+      docker_image: { type: string, default: "" }
+      confirm: { type: string, default: "" }
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  SHARED_RG: rg-kubeshop-shared
+  TF_VAR_backup_storage_account: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+  ANSIBLE_FORCE_COLOR: "1"
+
+jobs:
+  ops:
+    name: ${{ inputs.routine }} (${{ inputs.environment }})
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validar parâmetros da rotina
+        env:
+          ROUTINE: ${{ inputs.routine }}
+          CONFIRM: ${{ inputs.confirm }}
+          DOCKER_TAG: ${{ inputs.docker_tag }}
+        run: |
+          if [ "$ROUTINE" = "restore" ] && [ "$CONFIRM" != "RESTAURAR" ]; then
+            echo "::error::restore substitui os pedidos atuais. Digite RESTAURAR no campo confirm."; exit 1
+          fi
+          if [ "$ROUTINE" = "deploy-app" ] && [ -z "$DOCKER_TAG" ]; then
+            echo "::error::deploy-app exige docker_tag"; exit 1
+          fi
+          echo "## Rotina ${ROUTINE} - ${{ inputs.environment }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Terraform init (somente leitura dos outputs)
+        uses: ./.github/actions/tf-init
+        with:
+          environment: ${{ inputs.environment }}
+
+      - name: Acesso SSH e inventário
+        id: access
+        uses: ./.github/actions/ssh-access
+        with:
+          environment: ${{ inputs.environment }}
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Executar rotina
+        working-directory: ansible
+        env:
+          MONGO_ROOT_PASSWORD: ${{ secrets.MONGO_ROOT_PASSWORD }}
+          MONGO_APP_PASSWORD: ${{ secrets.MONGO_APP_PASSWORD }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          ROUTINE: ${{ inputs.routine }}
+          SERVICE: ${{ inputs.service }}
+          BACKUP_NAME: ${{ inputs.backup_name }}
+          DOCKER_TAG: ${{ inputs.docker_tag }}
+          DOCKER_IMAGE: ${{ inputs.docker_image }}
+        run: |
+          jq -n \
+            --arg service "$SERVICE" \
+            --arg backup_name "$BACKUP_NAME" \
+            --arg docker_tag "$DOCKER_TAG" \
+            --arg docker_image "${DOCKER_IMAGE:-ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kubeshop}" \
+            '$ARGS.named | with_entries(select(.value != ""))' > /tmp/extra-vars.json
+          ansible-playbook "ops-${ROUTINE}.yml" -e @/tmp/extra-vars.json 2>&1 | tee /tmp/ansible.log
+          {
+            echo '```'
+            sed 's/\x1b\[[0-9;]*m//g' /tmp/ansible.log | grep -E 'BACKUP_OK|RESTORE_OK|"result":"PASS"|orders|Último backup|pedido|kubeshop-.*archive' | head -40 || true
+            sed 's/\x1b\[[0-9;]*m//g' /tmp/ansible.log | sed -n '/PLAY RECAP/,/^$/p'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fechar SSH temporário
+        if: always() && steps.access.outputs.resource_group != ''
+        run: scripts/infra/jit-ssh.sh close "${{ steps.access.outputs.resource_group }}" "${{ steps.access.outputs.app_nsg }}"

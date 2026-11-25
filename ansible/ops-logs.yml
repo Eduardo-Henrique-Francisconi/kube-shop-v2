@@ -1,0 +1,32 @@
+---
+# Rotina: diagnóstico pelos logs. -e service=api|frontend|mongo|backup|all -e lines=200
+- name: Logs dos serviços
+  hosts: all
+  become: true
+  vars:
+    service: all
+    lines: 200
+    ops_containers:
+      app: [frontend, api]
+      db: [mongo]
+  tasks:
+    - name: Logs dos contêineres
+      ansible.builtin.command: docker logs --tail {{ lines | int }} --timestamps {{ item }}
+      loop: "{{ ops_containers[group_names[0]] | select('in', ([service] if service != 'all' else ops_containers[group_names[0]])) | list }}"
+      register: ops_logs
+      changed_when: false
+    - name: Saída dos logs
+      ansible.builtin.debug:
+        msg: "{{ (['===== ' ~ item.item] + item.stdout_lines + item.stderr_lines) }}"
+      loop: "{{ ops_logs.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+    - name: Logs do backup (journald)
+      ansible.builtin.command: journalctl -u kubeshop-backup.service -n {{ lines | int }} --no-pager
+      register: ops_journal
+      changed_when: false
+      when: inventory_hostname in groups['db'] and service in ['all', 'backup']
+    - name: Saída do backup
+      ansible.builtin.debug:
+        msg: "{{ ops_journal.stdout_lines }}"
+      when: ops_journal is not skipped

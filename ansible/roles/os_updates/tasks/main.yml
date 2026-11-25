@@ -1,0 +1,40 @@
+---
+# Sempre VERIFICA as atualizações pendentes; só APLICA quando update_os=true.
+- name: Atualizar o cache do apt (no máximo 1x por hora)
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
+  changed_when: false   # atualizar o índice do apt não altera a configuração do servidor
+
+- name: Listar pacotes com atualização disponível
+  ansible.builtin.command: apt list --upgradable
+  register: os_upgradable
+  changed_when: false
+
+- name: Informar atualizações pendentes
+  ansible.builtin.debug:
+    msg: >-
+      {{ (os_upgradable.stdout_lines | select('search', '/') | list | length) }}
+      pacote(s) com atualização disponível. update_os={{ update_os | bool }}
+
+- name: Aplicar atualizações do sistema
+  ansible.builtin.apt:
+    upgrade: dist
+    autoremove: true
+    lock_timeout: 300
+  when: update_os | bool
+
+- name: Verificar se é necessário reiniciar
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: os_reboot_flag
+  when: update_os | bool
+
+- name: Reiniciar somente se o SO pedir
+  ansible.builtin.reboot:
+    reboot_timeout: "{{ os_reboot_timeout }}"
+    msg: "Reinício após atualização do SO (Ansible)"
+  when:
+    - update_os | bool
+    - os_reboot_flag.stat.exists

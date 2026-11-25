@@ -1,0 +1,57 @@
+name: Acesso SSH e inventário
+description: Lê os outputs do Terraform (já inicializado), abre SSH temporário para o runner, gera o inventário e instala o Ansible.
+inputs:
+  environment:
+    description: dev, homolog ou prod
+    required: true
+  ssh-private-key:
+    description: Chave privada SSH (Secret)
+    required: true
+outputs:
+  resource_group:
+    value: ${{ steps.out.outputs.resource_group }}
+  app_nsg:
+    value: ${{ steps.out.outputs.app_nsg }}
+  app_private_ip:
+    value: ${{ steps.out.outputs.app_private_ip }}
+  app_url:
+    value: ${{ steps.out.outputs.app_url }}
+runs:
+  using: composite
+  steps:
+    - name: Ler outputs do Terraform
+      id: out
+      shell: bash
+      run: |
+        o="$(terraform -chdir=terraform output -json)"
+        echo "resource_group=$(jq -r .resource_group.value <<<"$o")" >> "$GITHUB_OUTPUT"
+        echo "app_nsg=$(jq -r .app_nsg_name.value <<<"$o")" >> "$GITHUB_OUTPUT"
+        echo "app_private_ip=$(jq -r .app_private_ip.value <<<"$o")" >> "$GITHUB_OUTPUT"
+        echo "app_url=$(jq -r .app_url.value <<<"$o")" >> "$GITHUB_OUTPUT"
+        sas="$(terraform -chdir=terraform output -raw backup_sas)"
+        echo "::add-mask::${sas}"
+        echo "BACKUP_SAS=${sas}" >> "$GITHUB_ENV"
+
+    - name: Chave SSH da pipeline
+      shell: bash
+      env:
+        SSH_PRIVATE_KEY: ${{ inputs.ssh-private-key }}
+      run: |
+        mkdir -p ~/.ssh && chmod 700 ~/.ssh
+        printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/kubeshop
+        chmod 600 ~/.ssh/kubeshop
+
+    - name: Abrir SSH temporário para o runner
+      shell: bash
+      run: scripts/infra/jit-ssh.sh open "${{ steps.out.outputs.resource_group }}" "${{ steps.out.outputs.app_nsg }}" "${{ steps.out.outputs.app_private_ip }}"
+
+    - name: Gerar inventário do Ansible a partir dos outputs
+      shell: bash
+      run: scripts/infra/render-inventory.sh "${{ inputs.environment }}"
+
+    - name: Instalar Ansible e coleções
+      shell: bash
+      run: |
+        pipx install --force --include-deps "ansible-core>=2.17" >/dev/null
+        ansible-galaxy collection install -r ansible/requirements.yml >/dev/null
+        ansible --version | head -1

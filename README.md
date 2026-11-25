@@ -1,5 +1,48 @@
 # KubeShop
 
+> **PM04 · Projeto Final — Infraestrutura como Código + SRE.** Este fork adiciona a infraestrutura em nuvem do KubeShop (Azure) com **Terraform**, **Ansible** e **GitHub Actions**, atendendo ao `escopo.pdf` da Zibiska Korp. A aplicação original continua intacta em `apps/` (execução local descrita mais abaixo).
+
+## Infraestrutura em nuvem (PM04)
+
+![Arquitetura](docs/assets/arquitetura-infra.svg)
+
+Duas VMs Ubuntu 24.04 na Azure: **aplicação** (Nginx + API em Docker, IP público, porta 80) e **banco** (MongoDB autenticado em VM exclusiva, **sem IP público**, porta 27017 aceita só a VM da aplicação pela rede privada, dados em disco gerenciado separado, backup diário para Blob Storage).
+
+```
+.github/
+  workflows/
+    bootstrap.yml      0 - Infra | Bootstrap (state + backups, uma vez)
+    deploy.yml         1 - Infra | Provisionar e configurar (Terraform -> Ansible)
+    ops.yml            2 - Infra | Operação (health, logs, restart, backup, restore, smoke, deploy-app)
+    destroy.yml        9 - Infra | Desativar ambiente
+    app-images.yml     App | Build e publicação das imagens (CI/CD da aplicação)
+  actions/             tf-init e ssh-access (passos reutilizados)
+terraform/             providers, backend, variables, network, compute, backup, outputs
+ansible/
+  playbook.yml         configuração completa (executada pelo deploy)
+  ops-*.yml            rotinas de operação
+  group_vars/          valores padrão (sobrescritos pelos parâmetros da pipeline)
+  roles/               os_updates, packages, docker, data_disk, mongodb, backup, app, verify
+scripts/infra/         bootstrap, inventário a partir dos outputs, SSH temporário
+docs/infra/            documentação (arquitetura, preparação, operação, custos, CI/CD, validação)
+evidencias/            prints e links das execuções
+```
+
+| Documento | Conteúdo |
+|---|---|
+| [1. Arquitetura](docs/infra/01-arquitetura.md) | Diagrama, decisões, justificativas, requisitos × implementação, limitações |
+| [2. Preparação](docs/infra/02-preparacao.md) | Service principal, chave SSH, Secrets, Variables, Environments, primeira execução |
+| [3. Operação](docs/infra/03-operacao.md) | Parâmetros, rotinas, backup/restauração, acesso ao banco, desativação, falhas comuns |
+| [4. Custos](docs/infra/04-custos.md) | Estimativa mensal com premissas e fontes |
+| [5. Integração CI/CD](docs/infra/05-integracao-cicd.md) | Contrato com o pipeline da aplicação e segredos necessários |
+| [6. Validação](docs/infra/06-validacao.md) | Cenários 1–3 do PM04 e critérios ACE-01..10 |
+
+**Início rápido:** configure os Secrets/Variables ([cap. 2](docs/infra/02-preparacao.md)) → rode `0 - Bootstrap` → `App | Build` com `version=1.0.0` → `1 - Infra` com `environment=dev`, `action=apply`.
+
+---
+
+## Aplicação (execução local original)
+
 O KubeShop é um projeto didático para o Laboratório de Engenharia de Software do professor Laercio. O objetivo é praticar o deploy de uma aplicação em nuvem, desde a preparação do ambiente até a publicação e a verificação dos serviços.
 
 A aplicação simula uma loja virtual com catálogo, carrinho e histórico de pedidos. Ela reúne uma interface em React servida pelo Nginx, uma API em Node.js/Express e um banco MongoDB com armazenamento persistente. Essa estrutura permite trabalhar com containers, comunicação entre serviços, configuração do ambiente e persistência de dados durante as atividades do laboratório.

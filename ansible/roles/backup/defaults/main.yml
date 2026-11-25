@@ -1,0 +1,5 @@
+---
+backup_local_dir: /var/backups/kubeshop
+backup_schedule: "*-*-* 03:00:00"
+backup_keep_local: 7
+mongo_container_name: mongo

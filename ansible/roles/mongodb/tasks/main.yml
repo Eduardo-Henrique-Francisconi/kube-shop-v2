@@ -1,0 +1,102 @@
+---
+- name: Garantir que os segredos do banco foram informados
+  ansible.builtin.assert:
+    that:
+      - mongo_root_password | length >= 16
+      - mongo_app_password | length >= 16
+    fail_msg: "MONGO_ROOT_PASSWORD e MONGO_APP_PASSWORD (>=16 caracteres) devem estar nos Secrets do ambiente."
+    quiet: true
+  no_log: true
+
+- name: Diretório de configuração do MongoDB
+  ansible.builtin.file:
+    path: "{{ mongo_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Arquivos de senha (lidos pelo usuário mongodb do contêiner)
+  ansible.builtin.copy:
+    dest: "{{ mongo_config_dir }}/{{ item.name }}"
+    content: "{{ item.value }}"
+    owner: "{{ mongo_uid }}"
+    group: "{{ mongo_uid }}"
+    mode: "0400"
+  loop:
+    - { name: mongo_root_password, value: "{{ mongo_root_password }}" }
+    - { name: mongo_app_password, value: "{{ mongo_app_password }}" }
+    - { name: mongotools.yml, value: "password: {{ mongo_root_password | to_json }}\n" }
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+
+# Scripts do próprio repositório da aplicação (docker/mongodb), reaproveitados.
+- name: Script de criação do usuário da aplicação e healthcheck
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../docker/mongodb/{{ item.src }}"
+    dest: "{{ mongo_config_dir }}/{{ item.dest }}"
+    owner: root
+    group: root
+    mode: "0644"
+  loop:
+    - { src: init.js, dest: 10-app-user.js }
+    - { src: healthcheck.js, dest: healthcheck.js }
+
+- name: Script de contagem de pedidos (usado em backup/restauração)
+  ansible.builtin.copy:
+    src: count-orders.js
+    dest: "{{ mongo_config_dir }}/count-orders.js"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Contêiner MongoDB (porta publicada SOMENTE no IP privado)
+  community.docker.docker_container:
+    name: "{{ mongo_container_name }}"
+    image: "mongo:{{ mongo_tag }}"
+    state: started
+    restart_policy: unless-stopped
+    command: ["--bind_ip_all", "--wiredTigerCacheSizeGB", "{{ mongo_cache_gb }}"]
+    published_ports:
+      - "{{ db_private_ip }}:27017:27017"   # nunca 0.0.0.0
+    env:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
+      MONGO_INITDB_DATABASE: "{{ mongo_database }}"
+      MONGO_APP_USERNAME: "{{ mongo_app_username }}"
+      MONGO_APP_PASSWORD_FILE: /run/secrets/mongo_app_password
+    volumes:
+      - "{{ mongo_data_mount }}/db:/data/db"               # disco gerenciado do Azure
+      - "{{ mongo_data_mount }}/configdb:/data/configdb"
+      - "{{ mongo_config_dir }}/mongo_root_password:/run/secrets/mongo_root_password:ro"
+      - "{{ mongo_config_dir }}/mongo_app_password:/run/secrets/mongo_app_password:ro"
+      - "{{ mongo_config_dir }}/mongotools.yml:/run/secrets/mongotools.yml:ro"
+      - "{{ mongo_config_dir }}/10-app-user.js:/docker-entrypoint-initdb.d/10-app-user.js:ro"
+      - "{{ mongo_config_dir }}/healthcheck.js:/opt/healthcheck.js:ro"
+      - "{{ mongo_config_dir }}/count-orders.js:/opt/count-orders.js:ro"
+    security_opts:
+      - no-new-privileges:true
+    stop_timeout: 30
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--file", "/opt/healthcheck.js"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    log_driver: json-file
+    log_options:
+      max-size: "10m"
+      max-file: "3"
+    labels:
+      app: kubeshop
+      component: mongodb
+      environment: "{{ env_name }}"
+
+- name: Aguardar o MongoDB ficar healthy
+  community.docker.docker_container_info:
+    name: "{{ mongo_container_name }}"
+  register: mongo_info
+  until: mongo_info.container.State.Health.Status | default('') == 'healthy'
+  retries: 30
+  delay: 5

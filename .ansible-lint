@@ -1,0 +1,9 @@
+# Os nomes das variáveis seguem os parâmetros da pipeline do PM04
+# (update_os, extra_packages, docker_tag...), compartilhados entre roles.
+skip_list:
+  - var-naming[no-role-prefix]
+exclude_paths:
+  - .github/
+  - node_modules/
+  - apps/
+  - terraform/

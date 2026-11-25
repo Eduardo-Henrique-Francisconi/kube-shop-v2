@@ -9,3 +9,13 @@ coverage/
 test-results/
 playwright-report/
 *.log
+
+# Infra (gerados pela pipeline / locais)
+ansible/inventory/hosts.yml
+terraform/.terraform/
+terraform/*.tfstate*
+terraform/*.tfplan
+terraform/terraform.tfvars
+*.pem
+id_*
+.ansible/

@@ -1,0 +1,18 @@
+---
+- name: Normalizar extra_packages (texto "curl, git" ou lista)
+  ansible.builtin.set_fact:
+    packages_extras: >-
+      {{ (extra_packages.split(',') | map('trim') | select | list)
+         if extra_packages is string else (extra_packages | default([])) }}
+
+- name: Instalar pacotes base e adicionais
+  ansible.builtin.apt:
+    name: "{{ pacotes_base + packages_extras }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+    lock_timeout: 300
+
+- name: Pacotes instalados nesta configuração
+  ansible.builtin.debug:
+    msg: "base={{ pacotes_base | join(',') }} | extras={{ packages_extras | join(',') | default('-', true) }}"

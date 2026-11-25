@@ -1,0 +1,35 @@
+name: 0 - Infra | Bootstrap (executar uma vez)
+
+# Cria o armazenamento compartilhado do Terraform State e dos backups.
+# Idempotente: pode ser executado novamente sem efeitos colaterais.
+on:
+  workflow_dispatch:
+    inputs:
+      backup_retention_days:
+        description: Dias de retenção dos backups no Blob Storage
+        type: string
+        default: "30"
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login no Azure CLI
+        env:
+          ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          az login --service-principal --username "$ARM_CLIENT_ID" --password "$ARM_CLIENT_SECRET" --tenant "$ARM_TENANT_ID" --output none
+          az account set --subscription "$ARM_SUBSCRIPTION_ID"
+      - name: Criar resource group, storage account, containers e retenção
+        env:
+          AZURE_STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'eastus2' }}
+          BACKUP_RETENTION_DAYS: ${{ inputs.backup_retention_days }}
+        run: scripts/infra/bootstrap-azure.sh

@@ -1,0 +1,33 @@
+---
+# Rotina: consulta de saúde (não altera nada)
+- name: Saúde do ambiente
+  hosts: all
+  become: true
+  tasks:
+    - name: Contêineres em execução
+      ansible.builtin.command: docker ps -a
+      register: ops_ps
+      changed_when: false
+    - name: Uso de disco e memória
+      ansible.builtin.shell: df -h / /data/mongo 2>/dev/null; free -m; uptime
+      register: ops_res
+      changed_when: false
+    - name: Resultado
+      ansible.builtin.debug:
+        msg: "{{ ops_ps.stdout_lines + ops_res.stdout_lines }}"
+    - name: Último backup bem-sucedido
+      ansible.builtin.command: cat /var/backups/kubeshop/.last-success
+      register: ops_last_backup
+      changed_when: false
+      failed_when: false
+      when: inventory_hostname in groups['db']
+    - name: Mostrar último backup
+      ansible.builtin.debug:
+        msg: "Último backup: {{ ops_last_backup.stdout | default('nenhum') }}"
+      when: inventory_hostname in groups['db']
+
+- name: Verificações funcionais
+  hosts: all
+  become: true
+  roles:
+    - verify

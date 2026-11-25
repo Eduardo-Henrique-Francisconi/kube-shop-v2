@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Lista os backups disponíveis no Azure Blob Storage e no disco local.
+set -euo pipefail
+source /etc/kubeshop/backup.env
+echo "== Remotos (${BACKUP_URL})"
+curl -fsS "${BACKUP_URL}${BACKUP_SAS}&restype=container&comp=list&prefix=kubeshop-${ENV_NAME}-" \
+  | grep -o '<Name>[^<]*</Name>' | sed -e 's/<[^>]*>//g' | sort
+echo "== Locais (${BACKUP_LOCAL_DIR})"
+ls -1t "${BACKUP_LOCAL_DIR}"/kubeshop-*.archive.gz 2>/dev/null | xargs -r -n1 basename || true
