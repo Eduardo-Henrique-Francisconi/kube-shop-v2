@@ -107,9 +107,10 @@ jobs:
 
       - name: Instalar Ansible
         run: |
-          pipx install --force --include-deps "ansible-core>=2.17" >/dev/null
-          pipx install --force ansible-lint >/dev/null
-          ansible-galaxy collection install -r ansible/requirements.yml >/dev/null
+          python3 -m venv "$RUNNER_TEMP/ansible-venv"
+          "$RUNNER_TEMP/ansible-venv/bin/pip" install -q "ansible-core>=2.17" ansible-lint
+          echo "$RUNNER_TEMP/ansible-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ansible-venv/bin/ansible-galaxy" collection install -r ansible/requirements.yml >/dev/null
 
       - name: ansible-playbook --syntax-check
         working-directory: ansible
