@@ -29,5 +29,7 @@
 - name: Verificações funcionais
   hosts: all
   become: true
+  vars:
+    verify_check_version: false   # health não recebe docker_tag: só informa a versão em execução
   roles:
     - verify
