@@ -83,5 +83,5 @@
       ansible.builtin.assert:
         that:
           - verify_products.json.products | length == 6
-          - verify_info.json.version | string == docker_tag | string
+          - not (verify_check_version | default(true) | bool) or (verify_info.json.version | string == docker_tag | string)
         success_msg: "Catálogo OK; versão {{ verify_info.json.version }}"
